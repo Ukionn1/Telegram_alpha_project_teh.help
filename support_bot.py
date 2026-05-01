@@ -3,6 +3,7 @@ import logging
 import os
 from datetime import datetime
 from aiogram import Bot, Dispatcher, F, Router
+from aiogram.client.default import DefaultBotProperties
 from aiogram.types import Message, CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.filters import Command
@@ -12,24 +13,25 @@ logging.basicConfig(level=logging.INFO)
 
 # ================= НАСТРОЙКИ ИЗ RAILWAY =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-MODERATORS_STR = os.getenv("MODERATORS", "")  # Пример: "123456789,987654321"
+MODERATORS_STR = os.getenv("MODERATORS", "")   # Пример: "123456789,987654321"
 
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN не задан в переменных окружения!")
 
-# Преобразуем строку в список int
-MODERATORS = []
-for x in MODERATORS_STR.split(","):
-    x = x.strip()
-    if x.isdigit():
-        MODERATORS.append(int(x))
+# Преобразуем строку в список ID
+MODERATORS = [int(x.strip()) for x in MODERATORS_STR.split(",") if x.strip().isdigit()]
 
 if not MODERATORS:
     logging.warning("MODERATORS не заданы! Только владелец бота сможет принимать тикеты.")
 
 DB_NAME = "support.db"
 
-bot = Bot(token=BOT_TOKEN, parse_mode="HTML")
+# ================= БОТ =================
+bot = Bot(
+    token=BOT_TOKEN,
+    default=DefaultBotProperties(parse_mode="HTML")
+)
+
 dp = Dispatcher()
 router = Router()
 dp.include_router(router)
@@ -53,7 +55,6 @@ async def init_db():
                 response TEXT
             );
         """)
-        # Примеры автоответов
         await db.executemany("INSERT OR IGNORE INTO auto_replies (keyword, response) VALUES (?, ?)", [
             ("привет", "Здравствуйте! Чем могу помочь?"),
             ("цена", "Уточните, пожалуйста, какой товар или услуга вас интересует."),
@@ -78,7 +79,7 @@ def get_ticket_keyboard(ticket_id: int, user_id: int):
     return kb.as_markup()
 
 
-# ================= ХЭНДЛЕРЫ (остались почти без изменений) =================
+# ================= ХЭНДЛЕРЫ =================
 
 @router.message(Command("start"))
 async def cmd_start(message: Message):
@@ -174,7 +175,7 @@ async def accept_ticket(callback: CallbackQuery):
         pass
 
 
-# Ответ модератора
+# Ответ модератора пользователю
 @router.message(F.chat.type == "private", lambda m: m.from_user.id in MODERATORS)
 async def mod_reply(message: Message):
     async with aiosqlite.connect(DB_NAME) as db:
@@ -210,6 +211,7 @@ async def close_ticket(callback: CallbackQuery):
         pass
 
 
+# Очередь тикетов
 @router.message(Command("queue"))
 async def show_queue(message: Message):
     if message.from_user.id not in MODERATORS:
