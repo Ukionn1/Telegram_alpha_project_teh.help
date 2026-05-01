@@ -126,8 +126,8 @@ async def show_active(message: Message):
     kb = InlineKeyboardBuilder()
     text = "📋 <b>Ваши активные заявки:</b>\n\n"
 
-    for i, (ticket_id, user_id, category) in enumerate(tickets, 1):
-        text += f"{i}. #{ticket_id} | {category} | Пользователь: <code>{user_id}</code>\n"
+    for ticket_id, user_id, category in tickets:
+        text += f"#{ticket_id} | {category} | Пользователь: <code>{user_id}</code>\n"
         kb.button(text=f"Выбрать #{ticket_id}", callback_data=f"switch_{ticket_id}")
 
     kb.adjust(1)
@@ -142,7 +142,7 @@ async def switch_ticket(callback: CallbackQuery):
     ticket_id = int(callback.data.split("_")[1])
     await set_current_ticket(callback.from_user.id, ticket_id)
 
-    await callback.message.edit_text(f"✅ Вы выбрали заявку #{ticket_id}\nТеперь все ваши сообщения будут отправляться в неё.")
+    await callback.message.edit_text(f"✅ Вы выбрали заявку #{ticket_id}\nТеперь все сообщения будут отправляться в неё.")
     await callback.answer("Заявка выбрана")
 
 
@@ -150,16 +150,25 @@ async def switch_ticket(callback: CallbackQuery):
 async def show_queue(message: Message):
     if message.from_user.id not in MODERATORS:
         return
+
     async with aiosqlite.connect(DB_NAME) as db:
-        async with db.execute("SELECT ticket_id, user_id, category FROM tickets WHERE status = 'pending'") as c:
+        async with db.execute(
+            "SELECT ticket_id, user_id, category FROM tickets WHERE status = 'pending' ORDER BY ticket_id"
+        ) as c:
             tickets = await c.fetchall()
+
     if not tickets:
-        await message.answer("✅ Очередь пуста")
-        return
+        return await message.answer("✅ Очередь пуста")
+
+    kb = InlineKeyboardBuilder()
     text = "📋 <b>Очередь заявок:</b>\n\n"
-    for t in tickets:
-        text += f"#{t[0]} | {t[2]} | Пользователь: <code>{t[1]}</code>\n"
-    await message.answer(text)
+
+    for ticket_id, user_id, category in tickets:
+        text += f"#{ticket_id} | {category} | Пользователь: <code>{user_id}</code>\n"
+        kb.button(text=f"Принять #{ticket_id}", callback_data=f"accept_{user_id}")
+
+    kb.adjust(2)  # по 2 кнопки в ряд
+    await message.answer(text, reply_markup=kb.as_markup())
 
 
 @router.message(Command("close"))
@@ -175,7 +184,6 @@ async def cmd_close(message: Message):
         await db.commit()
     await message.answer(f"✅ Заявка #{current} закрыта.")
     try:
-        # Получаем user_id для уведомления
         async with aiosqlite.connect(DB_NAME) as db:
             async with db.execute("SELECT user_id FROM tickets WHERE ticket_id = ?", (current,)) as c:
                 user_id = (await c.fetchone())[0]
@@ -183,8 +191,6 @@ async def cmd_close(message: Message):
     except:
         pass
 
-
-# ================= СООБЩЕНИЯ =================
 
 @router.message(F.chat.type == "private", lambda m: m.from_user.id not in MODERATORS)
 async def user_message(message: Message):
