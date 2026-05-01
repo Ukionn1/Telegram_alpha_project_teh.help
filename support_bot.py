@@ -81,12 +81,17 @@ async def choose_category(callback: CallbackQuery):
         )
         await db.commit()
 
-    await callback.message.edit_text(f"✅ Категория: <b>{category}</b>\n\nМожете писать сообщения (сколько угодно):")
+    await callback.message.edit_text(f"✅ Категория: <b>{category}</b>\n\nМожете писать сколько угодно сообщений:")
     await callback.answer()
 
 
+# Главный хэндлер пользователей — ИСПРАВЛЕНО
 @router.message(F.chat.type == "private")
 async def user_message(message: Message):
+    # ←←← ЭТО ГЛАВНОЕ ИСПРАВЛЕНИЕ
+    if message.from_user.id in MODERATORS:
+        return  # модераторы НЕ создают тикеты
+
     user_id = message.from_user.id
     text = (message.text or "").strip()
 
@@ -105,27 +110,28 @@ async def user_message(message: Message):
         if not ticket:
             return await message.answer("Нажмите /start и выберите категорию.")
 
-        ticket_id, mod_id, status, category = ticket
+        _, mod_id, status, category = ticket
 
         if status == "active" and mod_id:
-            await message.forward(mod_id)          # пересылаем модератору
+            await message.forward(mod_id)
             return
 
-        # Если тикет pending — отправляем уведомление модераторам
-        if status == "pending":
-            for mod_id in MODERATORS:
-                try:
-                    await bot.send_message(
-                        mod_id,
-                        f"🔔 <b>Новая заявка</b>\n"
-                        f"Категория: <b>{category}</b>\n"
-                        f"Пользователь: <code>{user_id}</code>\n\n"
-                        f"{text[:400]}...",
-                        reply_markup=get_accept_keyboard(user_id)
-                    )
-                except:
-                    continue
-            await message.answer("✅ Сообщение отправлено модераторам. Можете писать дальше.")
+        # Отправляем уведомление модераторам
+        for mod_id in MODERATORS:
+            try:
+                await bot.send_message(
+                    mod_id,
+                    f"🔔 <b>Новая заявка</b>\n"
+                    f"Категория: <b>{category}</b>\n"
+                    f"Пользователь: <code>{user_id}</code>\n\n"
+                    f"{text[:400]}...",
+                    reply_markup=get_accept_keyboard(user_id)
+                )
+            except:
+                continue
+
+        await message.answer("✅ Сообщение отправлено модераторам. Можете писать дальше.")
+
 
 # Ответ модератора (анонимно)
 @router.message(F.chat.type == "private", lambda m: m.from_user.id in MODERATORS)
@@ -160,7 +166,7 @@ async def accept_ticket(callback: CallbackQuery):
     await callback.message.edit_text(callback.message.text + f"\n\n✅ Принято {callback.from_user.full_name}")
     await callback.answer("Тикет принят!")
     try:
-        await bot.send_message(user_id, "✅ Заявка принята в работу! Можете писать дальше.")
+        await bot.send_message(user_id, "✅ Заявка принята в работу! Можете продолжать общение.")
     except:
         pass
 
