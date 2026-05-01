@@ -6,7 +6,7 @@ from datetime import datetime
 from collections import defaultdict
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.filters import Command
 import aiosqlite
@@ -24,7 +24,6 @@ MODERATORS = set(int(x.strip()) for x in MODERATORS_STR.split(",") if x.strip().
 SECRET_PHRASE = "стань_модератором_секрет123"
 DB_NAME = "support.db"
 
-# ================= АНТИСПАМ =================
 COOLDOWN_SECONDS = 8
 user_last_message = defaultdict(float)
 
@@ -32,6 +31,19 @@ bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
 router = Router()
 dp.include_router(router)
+
+
+def get_moderator_menu():
+    kb = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="📋 Текущая заявка"), KeyboardButton(text="❌ Закрыть текущую")],
+            [KeyboardButton(text="📝 Список открытых"), KeyboardButton(text="⏭ Взять ближайшую")],
+            [KeyboardButton(text="📁 Закрытые заявки")]
+        ],
+        resize_keyboard=True,
+        persistent=True
+    )
+    return kb
 
 
 async def init_db():
@@ -94,7 +106,10 @@ def category_keyboard():
 
 @router.message(Command("start"))
 async def cmd_start(message: Message):
-    await message.answer("👋 Выберите категорию:", reply_markup=category_keyboard())
+    if message.from_user.id in MODERATORS:
+        await message.answer("👋 Добро пожаловать, модератор!", reply_markup=get_moderator_menu())
+    else:
+        await message.answer("👋 Выберите категорию:", reply_markup=category_keyboard())
 
 
 @router.callback_query(F.data.startswith("cat_"))
@@ -127,7 +142,7 @@ async def show_active(message: Message):
             tickets = await c.fetchall()
 
     if not tickets:
-        return await message.answer("У вас нет активных заявок.")
+        return await message.answer("У вас нет активных заявок.", reply_markup=get_moderator_menu())
 
     kb = InlineKeyboardBuilder()
     text = "📋 <b>Ваши активные заявки:</b>\n\n"
@@ -188,7 +203,7 @@ async def cmd_close(message: Message):
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute("UPDATE tickets SET status = 'closed' WHERE ticket_id = ?", (current,))
         await db.commit()
-    await message.answer(f"✅ Заявка #{current} закрыта.")
+    await message.answer(f"✅ Заявка #{current} закрыта.", reply_markup=get_moderator_menu())
     try:
         async with aiosqlite.connect(DB_NAME) as db:
             async with db.execute("SELECT user_id FROM tickets WHERE ticket_id = ?", (current,)) as c:
@@ -198,14 +213,118 @@ async def cmd_close(message: Message):
         pass
 
 
-# ================= АНТИСПАМ + СООБЩЕНИЯ =================
+# ================= МЕНЮ МОДЕРАТОРА =================
+
+@router.message(F.chat.type == "private", lambda m: m.from_user.id in MODERATORS)
+async def moderator_menu_handler(message: Message):
+    text = message.text.strip()
+
+    if text == "📋 Текущая заявка":
+        current = await get_current_ticket(message.from_user.id)
+        if not current:
+            return await message.answer("❌ У вас нет выбранной заявки.", reply_markup=get_moderator_menu())
+
+        async with aiosqlite.connect(DB_NAME) as db:
+            async with db.execute(
+                "SELECT user_id, category, created_at FROM tickets WHERE ticket_id = ?",
+                (current,)
+            ) as c:
+                row = await c.fetchone()
+                if row:
+                    user_id, category, created_at = row
+                    await message.answer(
+                        f"📋 <b>Текущая заявка #{current}</b>\n\n"
+                        f"Категория: {category}\n"
+                        f"Пользователь: <code>{user_id}</code>\n"
+                        f"Создана: {created_at[:16]}",
+                        reply_markup=get_moderator_menu()
+                    )
+
+    elif text == "❌ Закрыть текущую":
+        current = await get_current_ticket(message.from_user.id)
+        if not current:
+            return await message.answer("❌ Нет выбранной заявки.", reply_markup=get_moderator_menu())
+
+        async with aiosqlite.connect(DB_NAME) as db:
+            await db.execute("UPDATE tickets SET status = 'closed' WHERE ticket_id = ?", (current,))
+            await db.commit()
+        await message.answer(f"✅ Заявка #{current} закрыта.", reply_markup=get_moderator_menu())
+
+    elif text == "📝 Список открытых":
+        async with aiosqlite.connect(DB_NAME) as db:
+            async with db.execute(
+                "SELECT ticket_id, user_id, category, status FROM tickets "
+                "WHERE status IN ('pending', 'active') ORDER BY ticket_id"
+            ) as c:
+                tickets = await c.fetchall()
+
+        if not tickets:
+            return await message.answer("Открытых заявок нет.", reply_markup=get_moderator_menu())
+
+        text = "📝 <b>Все открытые заявки:</b>\n\n"
+        for ticket_id, user_id, category, status in tickets:
+            status_emoji = "🟡" if status == "pending" else "🟢"
+            text += f"{status_emoji} #{ticket_id} | {category} | Пользователь: <code>{user_id}</code>\n"
+        await message.answer(text, reply_markup=get_moderator_menu())
+
+    elif text == "⏭ Взять ближайшую":
+        async with aiosqlite.connect(DB_NAME) as db:
+            async with db.execute(
+                "SELECT ticket_id FROM tickets WHERE status = 'pending' ORDER BY ticket_id LIMIT 1"
+            ) as c:
+                row = await c.fetchone()
+                if not row:
+                    return await message.answer("✅ Очередь пуста.", reply_markup=get_moderator_menu())
+
+                ticket_id = row[0]
+                await db.execute(
+                    "UPDATE tickets SET mod_id = ?, status = 'active' WHERE ticket_id = ?",
+                    (message.from_user.id, ticket_id)
+                )
+                await db.commit()
+
+        await set_current_ticket(message.from_user.id, ticket_id)
+        await message.answer(f"✅ Вы взяли заявку #{ticket_id} (сделана текущей).", reply_markup=get_moderator_menu())
+
+    elif text == "📁 Закрытые заявки":
+        async with aiosqlite.connect(DB_NAME) as db:
+            async with db.execute(
+                "SELECT ticket_id, user_id, category, created_at FROM tickets "
+                "WHERE status = 'closed' ORDER BY ticket_id DESC LIMIT 10"
+            ) as c:
+                tickets = await c.fetchall()
+
+        if not tickets:
+            return await message.answer("Закрытых заявок пока нет.", reply_markup=get_moderator_menu())
+
+        text = "📁 <b>Последние закрытые заявки:</b>\n\n"
+        for ticket_id, user_id, category, created_at in tickets:
+            text += f"#{ticket_id} | {category} | Пользователь: <code>{user_id}</code>\n"
+        await message.answer(text, reply_markup=get_moderator_menu())
+
+    else:
+        current_ticket = await get_current_ticket(message.from_user.id)
+        if current_ticket:
+            async with aiosqlite.connect(DB_NAME) as db:
+                async with db.execute(
+                    "SELECT user_id FROM tickets WHERE ticket_id = ? AND status = 'active'",
+                    (current_ticket,)
+                ) as c:
+                    row = await c.fetchone()
+                    if row:
+                        await bot.send_message(row[0], f"<b>Ответ поддержки:</b>\n\n{message.text}")
+                        await message.answer(f"✅ Отправлено в заявку #{current_ticket}", reply_markup=get_moderator_menu())
+        else:
+            await message.answer("❌ У вас нет выбранной заявки.\nИспользуйте меню.", reply_markup=get_moderator_menu())
+
+
+# ================= АНТИСПАМ + СООБЩЕНИЯ ПОЛЬЗОВАТЕЛЕЙ =================
 
 @router.message(F.chat.type == "private", lambda m: m.from_user.id not in MODERATORS)
 async def user_message(message: Message):
     user_id = message.from_user.id
     text = (message.text or "").strip()
 
-    # === АНТИСПАМ ===
     now = time.time()
     last_time = user_last_message[user_id]
     if now - last_time < COOLDOWN_SECONDS:
@@ -248,29 +367,6 @@ async def user_message(message: Message):
                 continue
 
         await message.answer("✅ Отправлено модераторам. Можете писать дальше.")
-
-
-@router.message(F.chat.type == "private", lambda m: m.from_user.id in MODERATORS)
-async def mod_reply(message: Message):
-    mod_id = message.from_user.id
-    current_ticket = await get_current_ticket(mod_id)
-
-    if not current_ticket:
-        return await message.answer("❌ У вас нет выбранной заявки.\nИспользуйте /active чтобы выбрать.")
-
-    async with aiosqlite.connect(DB_NAME) as db:
-        async with db.execute(
-            "SELECT user_id FROM tickets WHERE ticket_id = ? AND status = 'active'",
-            (current_ticket,)
-        ) as c:
-            row = await c.fetchone()
-            if not row:
-                return await message.answer("❌ Выбранная заявка больше не активна.")
-
-            user_id = row[0]
-            await bot.send_message(user_id, f"<b>Ответ поддержки:</b>\n\n{message.text}")
-
-    await message.answer(f"✅ Сообщение отправлено в заявку #{current_ticket}")
 
 
 @router.callback_query(F.data.startswith("accept_"))
