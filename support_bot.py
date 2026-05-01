@@ -19,7 +19,7 @@ if not BOT_TOKEN:
 
 MODERATORS = set(int(x.strip()) for x in MODERATORS_STR.split(",") if x.strip().isdigit())
 
-SECRET_PHRASE = "стань_модератором_секрет123"   # ← измени на свою
+SECRET_PHRASE = "стань_модератором_секрет123"
 
 DB_NAME = "support.db"
 
@@ -85,7 +85,7 @@ async def choose_category(callback: CallbackQuery):
     await callback.answer()
 
 
-# ================= СООБЩЕНИЯ ОТ ОБЫЧНЫХ ПОЛЬЗОВАТЕЛЕЙ =================
+# Сообщения от обычных пользователей
 @router.message(F.chat.type == "private", lambda m: m.from_user.id not in MODERATORS)
 async def user_message(message: Message):
     user_id = message.from_user.id
@@ -112,7 +112,7 @@ async def user_message(message: Message):
             await message.forward(mod_id)
             return
 
-        # Отправляем уведомление модераторам
+        # Уведомление модераторам
         for mod_id in MODERATORS:
             try:
                 await bot.send_message(
@@ -129,5 +129,87 @@ async def user_message(message: Message):
         await message.answer("✅ Сообщение отправлено модераторам. Можете писать дальше.")
 
 
-# ================= ОТВЕТЫ МОДЕРАТОРА =================
-@router.message(F.chat.type == "private", lambda m: m.from
+# Ответы модератора
+@router.message(F.chat.type == "private", lambda m: m.from_user.id in MODERATORS)
+async def mod_reply(message: Message):
+    async with aiosqlite.connect(DB_NAME) as db:
+        async with db.execute(
+            "SELECT user_id FROM tickets WHERE mod_id = ? AND status = 'active' ORDER BY ticket_id DESC LIMIT 1",
+            (message.from_user.id,)
+        ) as c:
+            row = await c.fetchone()
+            if row:
+                await bot.send_message(row[0], f"<b>Ответ поддержки:</b>\n\n{message.text}")
+
+
+@router.callback_query(F.data.startswith("accept_"))
+async def accept_ticket(callback: CallbackQuery):
+    if callback.from_user.id not in MODERATORS:
+        return await callback.answer("Нет прав!", show_alert=True)
+
+    user_id = int(callback.data.split("_")[1])
+    async with aiosqlite.connect(DB_NAME) as db:
+        async with db.execute(
+            "SELECT ticket_id FROM tickets WHERE user_id = ? AND status = 'pending' ORDER BY ticket_id DESC LIMIT 1",
+            (user_id,)
+        ) as c:
+            row = await c.fetchone()
+            if row:
+                await db.execute("UPDATE tickets SET mod_id = ?, status = 'active' WHERE ticket_id = ?",
+                                 (callback.from_user.id, row[0]))
+                await db.commit()
+
+    await callback.message.edit_text(callback.message.text + f"\n\n✅ Принято {callback.from_user.full_name}")
+    await callback.answer("Тикет принят!")
+    try:
+        await bot.send_message(user_id, "✅ Заявка принята в работу!")
+    except:
+        pass
+
+
+@router.message(Command("close"))
+async def cmd_close(message: Message):
+    if message.from_user.id not in MODERATORS:
+        return
+    async with aiosqlite.connect(DB_NAME) as db:
+        async with db.execute(
+            "SELECT ticket_id, user_id FROM tickets WHERE mod_id = ? AND status = 'active' ORDER BY ticket_id DESC LIMIT 1",
+            (message.from_user.id,)
+        ) as c:
+            row = await c.fetchone()
+            if row:
+                await db.execute("UPDATE tickets SET status = 'closed' WHERE ticket_id = ?", (row[0],))
+                await db.commit()
+                await message.answer("✅ Тикет закрыт.")
+                await bot.send_message(row[1], "🔒 Заявка закрыта.\nДля нового обращения нажмите /start")
+                return
+    await message.answer("❌ У вас нет активного тикета.")
+
+
+@router.message(Command("queue"))
+async def show_queue(message: Message):
+    if message.from_user.id not in MODERATORS:
+        return
+    async with aiosqlite.connect(DB_NAME) as db:
+        async with db.execute(
+            "SELECT ticket_id, user_id, category FROM tickets WHERE status = 'pending' ORDER BY ticket_id"
+        ) as c:
+            tickets = await c.fetchall()
+
+    if not tickets:
+        await message.answer("✅ Очередь пуста")
+        return
+
+    text = "📋 <b>Очередь заявок:</b>\n\n"
+    for t in tickets:
+        text += f"ID: <code>{t[0]}</code> | Пользователь: <code>{t[1]}</code> | {t[2]}\n"
+    await message.answer(text)
+
+
+async def main():
+    await init_db()
+    await dp.start_polling(bot)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
