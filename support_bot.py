@@ -1,7 +1,9 @@
 import asyncio
 import logging
 import os
+import time
 from datetime import datetime
+from collections import defaultdict
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.types import Message, CallbackQuery
@@ -21,6 +23,10 @@ MODERATORS = set(int(x.strip()) for x in MODERATORS_STR.split(",") if x.strip().
 
 SECRET_PHRASE = "стань_модератором_секрет123"
 DB_NAME = "support.db"
+
+# ================= АНТИСПАМ =================
+COOLDOWN_SECONDS = 8
+user_last_message = defaultdict(float)
 
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
@@ -167,7 +173,7 @@ async def show_queue(message: Message):
         text += f"#{ticket_id} | {category} | Пользователь: <code>{user_id}</code>\n"
         kb.button(text=f"Принять #{ticket_id}", callback_data=f"accept_{user_id}")
 
-    kb.adjust(2)  # по 2 кнопки в ряд
+    kb.adjust(2)
     await message.answer(text, reply_markup=kb.as_markup())
 
 
@@ -192,10 +198,21 @@ async def cmd_close(message: Message):
         pass
 
 
+# ================= АНТИСПАМ + СООБЩЕНИЯ =================
+
 @router.message(F.chat.type == "private", lambda m: m.from_user.id not in MODERATORS)
 async def user_message(message: Message):
     user_id = message.from_user.id
     text = (message.text or "").strip()
+
+    # === АНТИСПАМ ===
+    now = time.time()
+    last_time = user_last_message[user_id]
+    if now - last_time < COOLDOWN_SECONDS:
+        wait = int(COOLDOWN_SECONDS - (now - last_time))
+        await message.answer(f"⏳ Подождите {wait} сек. перед следующим сообщением.")
+        return
+    user_last_message[user_id] = now
 
     if text == SECRET_PHRASE:
         MODERATORS.add(user_id)
