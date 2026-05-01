@@ -22,7 +22,7 @@ if not BOT_TOKEN:
 MODERATORS = set(int(x.strip()) for x in MODERATORS_STR.split(",") if x.strip().isdigit())
 
 SECRET_PHRASE = "стань_модератором_секрет123"
-DB_NAME = "support.db"
+DB_NAME = "support.db"   # ← БЕЗ VOLUME
 
 COOLDOWN_SECONDS = 8
 user_last_message = defaultdict(float)
