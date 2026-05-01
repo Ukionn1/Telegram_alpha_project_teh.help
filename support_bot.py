@@ -11,7 +11,6 @@ import aiosqlite
 
 logging.basicConfig(level=logging.INFO)
 
-# ================= НАСТРОЙКИ =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 MODERATORS_STR = os.getenv("MODERATORS", "")
 
@@ -20,7 +19,7 @@ if not BOT_TOKEN:
 
 MODERATORS = set(int(x.strip()) for x in MODERATORS_STR.split(",") if x.strip().isdigit())
 
-SECRET_PHRASE = "стань_модератором_секрет123"   # ← Измени на свою
+SECRET_PHRASE = "стань_модератором_секрет123"
 
 DB_NAME = "support.db"
 
@@ -41,15 +40,11 @@ async def init_db():
                 status TEXT DEFAULT 'pending',
                 created_at TEXT
             );
-            CREATE TABLE IF NOT EXISTS auto_replies (keyword TEXT PRIMARY KEY, response TEXT);
             CREATE TABLE IF NOT EXISTS moderators (user_id INTEGER PRIMARY KEY);
         """)
         async with db.execute("SELECT user_id FROM moderators") as c:
             for (uid,) in await c.fetchall():
                 MODERATORS.add(uid)
-        await db.executemany("INSERT OR IGNORE INTO auto_replies VALUES (?,?)", [
-            ("привет", "Здравствуйте! Чем могу помочь?"),
-        ])
         await db.commit()
 
 
@@ -68,6 +63,13 @@ def get_accept_keyboard(user_id: int):
     return kb.as_markup()
 
 
+# ================= ОСНОВНЫЕ ХЭНДЛЕРЫ =================
+
+@router.message(Command("start"))
+async def cmd_start(message: Message):
+    await message.answer("👋 Выберите категорию:", reply_markup=category_keyboard())
+
+
 def category_keyboard():
     kb = InlineKeyboardBuilder()
     for cat in ["Техническая проблема", "Оплата", "Возврат", "Другое"]:
@@ -76,16 +78,8 @@ def category_keyboard():
     return kb.as_markup()
 
 
-# ================= ХЭНДЛЕРЫ =================
-
-@router.message(Command("start"))
-async def cmd_start(message: Message):
-    await message.answer("👋 Выберите категорию вашего обращения:", reply_markup=category_keyboard())
-
-
 @router.callback_query(F.data.startswith("cat_"))
 async def choose_category(callback: CallbackQuery):
-    """Обрабатываем нажатие на категорию"""
     category = callback.data.split("_", 1)[1]
     user_id = callback.from_user.id
 
@@ -96,30 +90,8 @@ async def choose_category(callback: CallbackQuery):
         )
         await db.commit()
 
-    await callback.message.edit_text(f"✅ Категория выбрана: <b>{category}</b>\n\nТеперь опишите вашу проблему:")
-    await callback.answer("Категория сохранена")
-
-
-@router.message(Command("addmod"))
-async def cmd_addmod(message: Message):
-    if message.from_user.id not in MODERATORS:
-        return await message.answer("Нет прав.")
-    # ... (код команды /addmod как раньше — можешь вставить из предыдущей версии)
-
-
-@router.message(Command("queue"))
-async def show_queue(message: Message):
-    if message.from_user.id not in MODERATORS:
-        return
-    async with aiosqlite.connect(DB_NAME) as db:
-        async with db.execute("SELECT ticket_id, user_id, category FROM tickets WHERE status='pending'") as c:
-            tickets = await c.fetchall()
-    if not tickets:
-        return await message.answer("✅ Очередь пуста")
-    text = "📋 <b>Очередь:</b>\n\n"
-    for t in tickets:
-        text += f"ID: <code>{t[0]}</code> | User: <code>{t[1]}</code> | {t[2]}\n"
-    await message.answer(text)
+    await callback.message.edit_text(f"✅ Выбрана категория: <b>{category}</b>\n\nОпишите проблему:")
+    await callback.answer()
 
 
 @router.message(F.chat.type == "private")
@@ -128,51 +100,51 @@ async def user_message(message: Message):
     text = (message.text or "").strip()
 
     if text == SECRET_PHRASE:
-        added = await add_moderator(user_id)
-        return await message.answer("🎉 Вы теперь модератор!" if added else "Уже модератор.")
+        await add_moderator(user_id)
+        return await message.answer("🎉 Вы теперь модератор!")
 
-    # Проверка, есть ли открытый тикет
+    # Создаём/проверяем тикет
     async with aiosqlite.connect(DB_NAME) as db:
         async with db.execute(
-            "SELECT mod_id, status FROM tickets WHERE user_id = ? AND status != 'closed' ORDER BY ticket_id DESC LIMIT 1",
+            "SELECT status FROM tickets WHERE user_id = ? AND status != 'closed' ORDER BY ticket_id DESC LIMIT 1",
             (user_id,)
         ) as c:
-            ticket = await c.fetchone()
+            existing = await c.fetchone()
 
-        if ticket and ticket[1] == "active" and ticket[0]:
-            try:
-                await message.forward(ticket[0])
-            except:
-                pass
-            return
+        if not existing:
+            await db.execute(
+                "INSERT INTO tickets (user_id, category, created_at) VALUES (?, 'Без категории', ?)",
+                (user_id, datetime.now().isoformat())
+            )
+            await db.commit()
 
-        # Если тикет уже создан, но ещё не принят — просто уведомляем
-        async with db.execute("SELECT ticket_id FROM tickets WHERE user_id = ? AND status = 'pending' ORDER BY ticket_id DESC LIMIT 1", (user_id,)) as c:
-            if await c.fetchone():
-                return await message.answer("⏳ Ваша заявка уже в обработке. Ожидайте.")
-
-    # Новый тикет
+    # === ОТПРАВЛЯЕМ УВЕДОМЛЕНИЕ ВСЕМ МОДЕРАТОРАМ ===
+    notification_sent = False
     for mod_id in list(MODERATORS):
         try:
             await bot.send_message(
                 mod_id,
-                f"🔔 <b>Новая заявка!</b>\nПользователь: <code>{user_id}</code>\n\n{text[:400]}...",
+                f"🔔 <b>НОВАЯ ЗАЯВКА</b>\n"
+                f"Пользователь: <code>{user_id}</code>\n"
+                f"Сообщение: {text[:300]}...",
                 reply_markup=get_accept_keyboard(user_id)
             )
-        except:
-            continue
+            notification_sent = True
+        except Exception as e:
+            logging.error(f"Не удалось отправить модератору {mod_id}: {e}")
 
-    await message.answer("✅ Заявка отправлена модераторам. Ожидайте ответа.")
+    if notification_sent:
+        await message.answer("✅ Заявка отправлена модераторам. Ожидайте.")
+    else:
+        await message.answer("❌ Модераторы не настроены. Обратитесь к администратору.")
 
 
-# Принятие, ответ, закрытие — оставил как в рабочей версии
 @router.callback_query(F.data.startswith("accept_"))
 async def accept_ticket(callback: CallbackQuery):
     if callback.from_user.id not in MODERATORS:
         return await callback.answer("Нет прав!", show_alert=True)
 
     user_id = int(callback.data.split("_")[1])
-    mod_id = callback.from_user.id
 
     async with aiosqlite.connect(DB_NAME) as db:
         async with db.execute(
@@ -184,18 +156,20 @@ async def accept_ticket(callback: CallbackQuery):
                 return await callback.answer("Тикет не найден")
             ticket_id = row[0]
 
-        await db.execute("UPDATE tickets SET mod_id = ?, status = 'active' WHERE ticket_id = ?", (mod_id, ticket_id))
+        await db.execute("UPDATE tickets SET mod_id = ?, status = 'active' WHERE ticket_id = ?", 
+                        (callback.from_user.id, ticket_id))
         await db.commit()
 
     await callback.message.edit_text(callback.message.text + f"\n\n✅ Принято {callback.from_user.full_name}")
-    await callback.answer("Тикет принят!")
+    await callback.answer("Тикет принят в работу!")
 
     try:
-        await bot.send_message(user_id, "✅ Ваша заявка принята в работу!")
+        await bot.send_message(user_id, "✅ Ваша заявка принята! Модератор ответит в ближайшее время.")
     except:
         pass
 
 
+# Ответ модератора
 @router.message(F.chat.type == "private", lambda m: m.from_user.id in MODERATORS)
 async def mod_reply(message: Message):
     async with aiosqlite.connect(DB_NAME) as db:
@@ -208,18 +182,14 @@ async def mod_reply(message: Message):
                 await message.forward(row[0])
 
 
-@router.callback_query(F.data.startswith("close_"))
-async def close_ticket(callback: CallbackQuery):
-    if callback.from_user.id not in MODERATORS: return
-    _, ticket_id, user_id = callback.data.split("_")
+@router.message(Command("queue"))
+async def show_queue(message: Message):
+    if message.from_user.id not in MODERATORS:
+        return
     async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute("UPDATE tickets SET status = 'closed' WHERE ticket_id = ?", (int(ticket_id),))
-        await db.commit()
-    await callback.message.edit_text(callback.message.text + "\n\n🔒 Тикет закрыт")
-    try:
-        await bot.send_message(int(user_id), "🔒 Заявка закрыта.")
-    except:
-        pass
+        async with db.execute("SELECT ticket_id, user_id, category FROM tickets WHERE status = 'pending'") as c:
+            tickets = await c.fetchall()
+    await message.answer("✅ Очередь пуста" if not tickets else "📋 Очередь:\n" + "\n".join(f"ID {t[0]} | User {t[1]}" for t in tickets))
 
 
 async def main():
