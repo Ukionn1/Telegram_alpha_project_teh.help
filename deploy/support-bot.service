@@ -1,0 +1,17 @@
+[Unit]
+Description=Telegram support bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/support-bot
+EnvironmentFile=/opt/support-bot/.env
+ExecStart=/opt/support-bot/.venv/bin/python /opt/support-bot/main.py
+Restart=always
+RestartSec=5
+User=supportbot
+Group=supportbot
+
+[Install]
+WantedBy=multi-user.target
