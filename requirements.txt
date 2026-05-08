@@ -1,2 +1,0 @@
-aiogram[fast]==3.27.0
-aiosqlite==0.22.1
